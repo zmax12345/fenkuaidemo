@@ -66,7 +66,7 @@ protected:
 	// 【必须】多线程环形缓冲 + 直写 + 分卷变量
 	// ==========================================
 	// 1. 内存池 (2000帧 ≈ 22GB，作为防洪大堤)
-	#define POOL_FRAME_COUNT  2000    
+	#define POOL_FRAME_COUNT  2600    
 	BYTE** m_pMemPool;
 	int    m_iHead;
 	int    m_iTail;

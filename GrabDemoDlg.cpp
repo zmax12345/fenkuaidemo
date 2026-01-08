@@ -75,6 +75,12 @@ CGrabDemoDlg::CGrabDemoDlg(CWnd* pParent /*=NULL*/)
 
     m_IsSignalDetected = TRUE;
 
+
+    // 【补上这部分初始化】
+    m_pMemPool = NULL;
+    m_hWorkerThread = NULL;
+    m_hFileRaw = INVALID_HANDLE_VALUE;
+    InitializeCriticalSection(&m_csPool); // <--- 没这行，一进锁就闪退
     // 【新增初始化】
     m_fpRaw = NULL;
     m_bIsRecording = FALSE;
@@ -312,6 +318,8 @@ BOOL CGrabDemoDlg::OnInitDialog()
         m_Buffers = new SapBufferWithTrash(2000, m_Acq);
 
         m_Xfer = new SapAcqToBuf(m_Acq, m_Buffers, XferCallback, this);
+
+        
     }
     else
     {
@@ -327,6 +335,31 @@ BOOL CGrabDemoDlg::OnInitDialog()
 
     // Create all objects
     if (!CreateObjects()) { EndDialog(TRUE); return FALSE; }
+
+    // =========================================================
+    if (m_Buffers && *m_Buffers) // 确保 buffer 已经创建成功
+    {
+        int width = m_Buffers->GetWidth();
+        int height = m_Buffers->GetHeight();
+        // 这一步之前报错，是因为没 Create。现在 Create 了，就不会报错了。
+        int bytesPerPixel = m_Buffers->GetBytesPerPixel();
+        int frameSize = width * height * bytesPerPixel;
+
+        // 申请指针数组
+        m_pMemPool = new BYTE * [POOL_FRAME_COUNT];
+
+        // 为每一帧申请 4KB 对齐的内存
+        for (int i = 0; i < POOL_FRAME_COUNT; i++)
+        {
+            m_pMemPool[i] = (BYTE*)VirtualAlloc(NULL, frameSize, MEM_COMMIT, PAGE_READWRITE);
+        }
+
+        // 重置指针
+        m_iHead = 0;
+        m_iTail = 0;
+        m_nPoolLoad = 0;
+    }
+    // =========================================================
 
     m_ImageWnd.AttachEventHandler(this);
     m_ImageWnd.CenterImage(true);
@@ -454,6 +487,20 @@ void CGrabDemoDlg::OnDestroy()
         fclose(m_fpRaw);
         m_fpRaw = NULL;
     }
+
+    // 【补上：释放内存池】
+    if (m_pMemPool)
+    {
+        for (int i = 0; i < POOL_FRAME_COUNT; i++)
+        {
+            if (m_pMemPool[i]) VirtualFree(m_pMemPool[i], 0, MEM_RELEASE);
+        }
+        delete[] m_pMemPool;
+        m_pMemPool = NULL;
+    }
+
+    // 【补上：删除锁】
+    DeleteCriticalSection(&m_csPool);
 
     // Destroy all objects
     DestroyObjects();
