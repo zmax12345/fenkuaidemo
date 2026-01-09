@@ -6,8 +6,8 @@ Fks = 100000;             % 采样频率
 T = 120;                 % 信号持续时间
 t = 0:1/Fs:T-1/Fs;          % 时间向量
 f_start = 5;           % 起始频率
-f_end = 100;            % 结束频率
-pulse_duration = 0.001;  % 脉冲持续时间
+f_end = 120;            % 结束频率
+pulse_duration = 0.0005;  % 脉冲持续时间
 R=log2(f_end/f_start) / T;%根据信号计算的扫频速度
 % 生成瞬时频率的扫频信号
 f_inst = f_start * 2.^(R * t);
