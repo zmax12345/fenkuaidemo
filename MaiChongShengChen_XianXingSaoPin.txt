@@ -1,0 +1,144 @@
+clc
+clear
+close all
+% 参数设置
+Fs = 100000;             % 采样频率
+T = 120;                 % 信号持续时间
+t = 0:1/Fs:T-1/Fs;          % 时间向量
+f_start = 5;           % 起始频率
+f_end = 120;            % 结束频率
+pulse_duration = 0.0005;  % 脉冲持续时间
+
+% 生成瞬时频率的扫频信号
+f_inst=linspace(f_start, f_end, length(t));
+f_sample = 10*f_inst; % 瞬时频率
+
+signal = sin(2 * pi * (f_start.*t+0.5*(f_end-f_start)./T.*t.^2));    % 生成扫频信号
+
+% 生成脉冲信号
+pulse = zeros(size(t));
+current_time = 0; % 当前时间
+intervals = [];   % 存储脉冲间隔
+pulse_count = 0;  % 脉冲计数器
+pulse_times = []; % 存储脉冲中心时间
+collected_signals = []; % 存储在脉冲时刻的扫频信号值
+
+while current_time < T
+    % 确保索引在有效范围内
+    index = round(current_time * Fs);
+    if index < 1
+        index = 1; % 确保索引不小于1
+    elseif index > length(f_sample)
+        break; % 超出范围，退出循环
+    end
+    
+    % 计算当前脉冲的间隔
+    interval = 1 / f_sample(index);
+    
+    % 定义脉冲
+    pulse_start = current_time;
+    pulse_end = current_time + pulse_duration; % 脉冲持续时间
+    
+    if pulse_end < T
+        pulse(t >= pulse_start & t <= pulse_end) = 10; % 定义脉冲
+        pulse_times = [pulse_times; pulse_start + pulse_duration / 2]; % 存储脉冲中心时间
+%         pulse_times = [pulse_times; pulse_start ]; % 存储脉冲中心时间
+        % 收集在脉冲时刻的扫频信号值
+        collected_signals = [collected_signals; signal(round(pulse_start * Fs)+1)]; 
+        
+        intervals = [intervals; interval]; % 记录脉冲间隔
+        pulse_count = pulse_count + 1;     % 增加脉冲计数
+    end
+    
+    % 更新当前时间
+    current_time = pulse_end + interval; % 计算下一个脉冲的起始时间
+end
+
+figure
+plot(t,pulse)
+title('相机采集间隔');
+xlabel('Time (s)');
+ylabel('幅值/V');
+xlim([0 T]); % 设置X轴范围
+set(gca,'FontSize',13);
+
+% 计算瞬时频率
+instantaneous_frequencies = 1 ./ intervals; % 瞬时频率，单位为Hz
+
+% 可视化瞬时频率
+figure;
+plot(pulse_times, instantaneous_frequencies);
+hold on
+plot(t,f_inst);
+legend('采样信号瞬时频率','扫频信号瞬时频率')
+title('扫频信号与采样信号瞬时频率对比');
+xlabel('Time (s)');
+ylabel('Frequency (Hz)');
+xlim([0 T]); % 设置X轴范围
+set(gca,'FontSize',13);
+
+collected_signals_new= sin(2 * pi * (f_start.*pulse_times+0.5*(f_end-f_start)./T.*pulse_times.^2));    % 生成扫频信号
+
+figure;
+plot(pulse_times, collected_signals, '.-');
+hold on
+plot(t, signal);
+title('1kHz单频信号与非均匀采样信号');
+xlabel('时间(s)');
+ylabel('幅值')
+legend('采样信号','原信号')
+set(gca,'FontSize',13);
+
+%%
+t_new= 0:1/Fs:2*T-1/Fs;          % 时间向量
+signal_new=zeros(size(t_new));
+signal_new(length(signal)+1:end)=signal;
+figure
+plot(t_new,signal_new)
+pulse_new=zeros(size(t_new));
+pulse_new(length(pulse)+1:end)=pulse;
+figure
+plot(t_new,pulse_new)
+
+%%
+% 列名称
+title={'xpos','value'};
+%生成表格，按列生成
+% VariableNames 参数用于设置列头
+result_table=table(t_new,pulse_new,'VariableNames',title);
+% 保存数据
+writetable(result_table, 'D:\桌面文档\博士工作\对数扫频采样\Test_Waichufa.csv');
+%%
+% 参数设置,生成单频信号
+frequency = 1000;      % 脉冲频率 (Hz)
+
+% 时间向量
+t = 0:1/Fs:T-1/Fs;
+
+% 生成脉冲信号
+pulse_signal = zeros(size(t));
+for n = 0:floor(frequency*T)-1
+    start_time = n / frequency;               % 脉冲开始时间
+    end_time = start_time + pulse_duration;     % 脉冲结束时间
+    pulse_signal(t >= start_time & t < end_time) = 10; % 设置脉冲
+end
+
+% 绘制脉冲信号
+figure;
+plot(t, pulse_signal);
+xlabel('Time (s)');
+ylabel('Amplitude');
+% axis([0 duration -0.5 1.5]);
+grid on;
+pulse_signal_new=zeros(size(t_new));
+pulse_signal_new(length(pulse_signal)+1:end)=pulse_signal;
+figure;
+plot(t_new, pulse_signal_new);
+%%
+% 列名称
+title={'xpos','value'};
+%生成表格，按列生成
+% VariableNames 参数用于设置列头
+result_table=table(t_new,pulse_signal_new,'VariableNames',title);
+% 保存数据
+writetable(result_table, 'D:\桌面文档\博士工作\对数扫频采样\Test_Waichufa.csv');
