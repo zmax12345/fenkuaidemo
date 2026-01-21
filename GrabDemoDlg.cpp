@@ -138,28 +138,33 @@ void CGrabDemoDlg::XferCallback(SapXferCallbackInfo* pInfo)
 
     if (!pDlg->m_bIsRecording) return;
 
+    void* pDest = NULL; // 目标地址
     EnterCriticalSection(&pDlg->m_csPool);
     if (pDlg->m_nPoolLoad < POOL_FRAME_COUNT)
     {
-        // 纯内存拷贝，极快，不会阻塞采集卡
+        pDest = pDlg->m_pMemPool[pDlg->m_iHead]; // 拿到地址就跑
+        pDlg->m_iHead = (pDlg->m_iHead + 1) % POOL_FRAME_COUNT;
+        pDlg->m_nPoolLoad++;
+    }
+    else
+    {
+        pDlg->WriteTrashLog(-1, pDlg->m_nFramesRecorded);
+    }
+    LeaveCriticalSection(&pDlg->m_csPool); // <--- 立刻解锁！让后台线程能工作
+
+    // 2. 在锁外面慢慢拷贝 (耗时操作)
+    if (pDest != NULL)
+    {
         void* pSrc = NULL;
         pDlg->m_Buffers->GetAddress(pDlg->m_Buffers->GetIndex(), &pSrc);
         int size = pDlg->m_Buffers->GetWidth() * pDlg->m_Buffers->GetHeight();
 
-        memcpy(pDlg->m_pMemPool[pDlg->m_iHead], pSrc, size);
+        // 放心拷，这块内存现在归我，后台线程还没读到它
+        memcpy(pDest, pSrc, size);
 
-        pDlg->m_iHead = (pDlg->m_iHead + 1) % POOL_FRAME_COUNT;
-        pDlg->m_nPoolLoad++;
-
-        // 告诉后台线程干活
+        // 3. 拷完了再通知后台线程
         SetEvent(pDlg->m_hDataAvailableEvent);
     }
-    else
-    {
-        // 内存池满了，说明 SSD 真的写不过来了 (软丢帧)
-        pDlg->WriteTrashLog(-1, pDlg->m_nFramesRecorded);
-    }
-    LeaveCriticalSection(&pDlg->m_csPool);
 }
 
 // =========================================================
@@ -247,9 +252,23 @@ void CGrabDemoDlg::WriteThreadLoop()
                 m_hFileRaw = CreateFile(nextFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING, NULL);
 
-                // 容错处理：如果直写失败，尝试普通模式
-                if (m_hFileRaw == INVALID_HANDLE_VALUE) {
-                    m_hFileRaw = CreateFile(nextFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (m_hFileRaw != INVALID_HANDLE_VALUE)
+                {
+                    // 【新增】预分配磁盘空间，防止 MFT 碎片化
+                    LARGE_INTEGER liSize;
+                    // 算好这个文件总共要多大：单帧大小 * 分卷帧数
+                    liSize.QuadPart = (LONGLONG)frameSize * CHUNK_FRAME_LIMIT;
+
+                    // 移动文件指针到末尾
+                    if (SetFilePointerEx(m_hFileRaw, liSize, NULL, FILE_BEGIN))
+                    {
+                        // 标记这里是文件结尾 (这一步就占住了磁盘空间)
+                        SetEndOfFile(m_hFileRaw);
+
+                        // 移回文件开头，准备开始写
+                        liSize.QuadPart = 0;
+                        SetFilePointerEx(m_hFileRaw, liSize, NULL, FILE_BEGIN);
+                    }
                 }
             }
         }
@@ -319,7 +338,7 @@ BOOL CGrabDemoDlg::OnInitDialog()
 
         m_Xfer = new SapAcqToBuf(m_Acq, m_Buffers, XferCallback, this);
 
-        
+
     }
     else
     {
@@ -616,24 +635,57 @@ void CGrabDemoDlg::UpdateMenu(void)
 
 void CGrabDemoDlg::OnFreeze()
 {
-    if (m_Xfer->Freeze())
+    // 1. 先让采集卡停止传输 (这是硬件层面的停止)
+    if (m_Xfer && m_Xfer->Freeze())
     {
         if (CAbortDlg(this, m_Xfer).DoModal() != IDOK)
             m_Xfer->Abort();
         UpdateMenu();
     }
 
-    if (m_fpRaw)
+    // 2. 处理录制逻辑停止 (这是软件层面的停止)
+    if (m_bIsRecording)
     {
-        fclose(m_fpRaw);
-        m_fpRaw = NULL;
+        m_bIsRecording = FALSE; // 第一步：关闸，阻止回调函数继续往内存池塞数据
 
+        // 第二步：通知后台线程下班
+        if (m_hStopEvent)
+        {
+            SetEvent(m_hStopEvent); // 发送停止信号
+            SetEvent(m_hDataAvailableEvent); // 踹一脚线程，防止它卡在等待数据的 Sleep 里
+
+            // 等待线程安全退出 (最多等2秒，防止死锁)
+            if (m_hWorkerThread)
+            {
+                WaitForSingleObject(m_hWorkerThread, 2000);
+                CloseHandle(m_hWorkerThread);
+                m_hWorkerThread = NULL;
+            }
+
+            // 清理事件句柄
+            CloseHandle(m_hStopEvent); m_hStopEvent = NULL;
+            CloseHandle(m_hDataAvailableEvent); m_hDataAvailableEvent = NULL;
+        }
+
+        // 第三步：兜底关闭文件 (如果线程退出前没来得及关)
+        if (m_hFileRaw != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(m_hFileRaw);
+            m_hFileRaw = INVALID_HANDLE_VALUE;
+        }
+
+        // 第四步：清理旧变量 (防止逻辑混淆)
+        if (m_fpRaw) { fclose(m_fpRaw); m_fpRaw = NULL; }
+
+        // 第五步：弹窗汇报战果
         CString strMsg;
-        // 提示总文件数
-        strMsg.Format(_T("录制完成！共 %d 帧，已保存为 %d 个分卷文件。"), m_nFramesRecorded, m_nChunkIndex + 1);
+        strMsg.Format(_T("录制已停止！\n\n累计采集: %d 帧\n生成分卷: %d 个"),
+            m_nFramesRecorded, m_nChunkIndex + 1);
         AfxMessageBox(strMsg);
+
+        // 第六步：复位状态栏文字
+        m_statusWnd.SetWindowText(_T("就绪"));
     }
-    m_bIsRecording = FALSE;
 }
 
 void CGrabDemoDlg::OnGrab()
@@ -690,6 +742,8 @@ void CGrabDemoDlg::OnGrab()
 
     m_Xfer->Grab();
     m_statusWnd.SetWindowText(_T("正在录制 (直写+分卷模式)..."));
+
+    UpdateMenu();
 }
 
 void CGrabDemoDlg::OnSnap()
